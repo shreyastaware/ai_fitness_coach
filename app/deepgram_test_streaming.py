@@ -1,3 +1,4 @@
+# Example filename: main.py
 import os
 import httpx
 import logging
@@ -11,18 +12,15 @@ from deepgram import (
     LiveOptions,
 )
 
+# URL for the realtime streaming audio you would like to transcribe
+URL = "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
+
 from dotenv import load_dotenv
 load_dotenv('/Users/shreyastaware/Desktop/ai_fitness_coach/app/.env')
 
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
 
-def transcribe_audio(audio_stream):
-    """
-    Transcribes audio using a speech-to-text service.
-    (Placeholder for Deepgram or other STT integration)
-    """
-    # In this setup, Twilio handles STT automatically via the Gather verb.
-    # This function is a placeholder for if you switch to a different provider.
+def main():
     try:
         # use default config
         deepgram: DeepgramClient = DeepgramClient(DEEPGRAM_API_KEY)
@@ -51,7 +49,7 @@ def transcribe_audio(audio_stream):
 
         # define a worker thread
         def myThread():
-            with httpx.stream("GET", audio_stream) as r:
+            with httpx.stream("GET", URL) as r:
                 for data in r.iter_bytes():
                     lock_exit.acquire()
                     if exit:
@@ -81,3 +79,6 @@ def transcribe_audio(audio_stream):
     except Exception as e:
         print(f"Could not open socket: {e}")
         return
+
+if __name__ == "__main__":
+    main()

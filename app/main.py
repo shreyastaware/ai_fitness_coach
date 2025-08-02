@@ -2,7 +2,7 @@ from fastapi import FastAPI, Form, Response, Request
 from twilio.twiml.voice_response import VoiceResponse, Gather
 
 # Import other modules
-from . import ai_agent, stt, tts
+# from . import ai_agent, stt, tts
 
 app = FastAPI()
 
@@ -15,13 +15,13 @@ async def voice(request: Request):
     response.say("Hello, welcome to the AI Fitness Coach. How can I help you today?")
 
     # Use Gather to collect speech and send it to /handle_speech
-    gather = Gather(input='speech', action='/handle_speech', speechTimeout='auto')
-    response.append(gather)
+    # gather = Gather(input='speech', action='/handle_speech', speechTimeout='auto')
+    # response.append(gather)
 
     # If the user doesn't say anything, redirect to listen again
-    response.redirect('/voice')
+    # response.redirect('/voice')
 
-    return Response(content=str(response), media_type="application/xml")
+    # return Response(content=str(response), media_type="application/xml")
 
 
 @app.post("/handle_speech")
@@ -57,3 +57,12 @@ async def handle_speech(request: Request, SpeechResult: str = Form(...)):
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
+
+@app.route("/answer", methods=['GET', 'POST'])
+def answer_call():
+    resp = VoiceResponse()
+    resp.say("Twilio's always there when you call!")
+    return str(resp)
+
+if __name__ == "__main__":
+    app.run()
