@@ -7,15 +7,6 @@ import uvicorn
 app = FastAPI()
 
 
-# @app.route("/twiml", methods=['POST'])
-# def twiml():
-#     resp = VoiceResponse()
-#     connect = Connect()
-#     connect.stream(url="wss://a511462199ba.ngrok-free.app/media")
-#     resp.append(connect)
-#     return Response(str(resp), mimetype='text/xml')
-
-
 @app.websocket("/media")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
