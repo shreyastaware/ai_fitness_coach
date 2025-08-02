@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+twilio
+deepgram-sdk
+openai
+langchain
+pinecone-client
+elevenlabs
+python-dotenv
