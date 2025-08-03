@@ -26,9 +26,9 @@ def call_someone_using_twilio_number(country_id, phone_number):
     client = Client(account_sid, auth_token)
 
     call = client.calls.create(
-    # url="http://demo.twilio.com/docs/voice.xml",
+    
     url = "https://handler.twilio.com/twiml/EHb03d0a5b07e6a2373f037d8c42719a37",
-    # twiml="<Response><Say>Hello! I am SORA, your AI fitness agent. How can I help you today?</Say></Response>",
+    
     to=f"+{country_id}{phone_number}",
     from_=twilio_number
     )
