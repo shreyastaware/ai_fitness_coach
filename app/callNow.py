@@ -15,6 +15,7 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER") # Your Twilio phone number
 RECIPIENT_PHONE_NUMBER = os.environ.get("RECIPIENT_PHONE_NUMBER") # The number to call
+HTTPS_WEBSOCKET_URL = os.environ.get("HTTPS_WEBSOCKET_URL")
 
 # --- Main Application ---
 def make_call():
@@ -28,11 +29,9 @@ def make_call():
     try:
         call = client.calls.create(
             to=RECIPIENT_PHONE_NUMBER,
+            # to="+918809779946",
             from_=TWILIO_PHONE_NUMBER,
-            # url="http://demo.twilio.com/docs/voice.xml",
-            url=f"https://661abe9f7e53.ngrok-free.app" # URL for the TwiML
-            # twiml="<Response><Say>Hello! I am SORA, your AI fitness agent. How can I help you today?</Say></Response>",
-            # url = "https://handler.twilio.com/twiml/EHb03d0a5b07e6a2373f037d8c42719a37",
+            url=HTTPS_WEBSOCKET_URL
         )
         logging.info(f"Call initiated with SID: {call.sid}")
     except Exception as e:
