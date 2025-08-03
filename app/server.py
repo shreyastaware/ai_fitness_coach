@@ -5,6 +5,7 @@ import logging
 import os
 import audioop
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import websockets
@@ -31,7 +32,7 @@ DEEPGRAM_URL = (
     "wss://api.deepgram.com/v1/listen"
     "?encoding=mulaw&sample_rate=8000&channels=1"
     "&punctuate=true&interim_results=true"
-    "&endpointing=true&utterance_end_ms=1500" # End utterance after 1.5s of silence
+    "&endpointing=true&utterance_end_ms=2000" # End utterance after 2s of silence (as requested)
 )
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
@@ -48,23 +49,41 @@ ELEVENLABS_URL = (
 # A queue to hold the user's transcribed text
 transcript_queue = asyncio.Queue()
 
-# A global task for the TTS stream to allow for interruption
+# Global state management
 tts_task = None
 bot_is_speaking = False
 last_audio_time = 0
-SILENCE_THRESHOLD = 0.5  # seconds of silence before considering speech ended
+SILENCE_THRESHOLD = 2.0  # 2 seconds of silence before considering speech ended (as requested)
 AUDIO_VOLUME_THRESHOLD = 100  # minimum audio level to consider as speech
+speech_lock = asyncio.Lock()  # Prevent race conditions
 
 def pcm_to_mulaw(pcm_data, sample_rate_in=16000, sample_rate_out=8000):
     """Convert PCM audio to mu-law format for Twilio."""
-    # Downsample from 16kHz to 8kHz if needed
-    if sample_rate_in != sample_rate_out:
-        # Simple downsampling by taking every other sample
-        pcm_data = pcm_data[::2]
-    
-    # Convert to mu-law
-    mulaw_data = audioop.lin2ulaw(pcm_data, 2)  # 2 = 16-bit samples
-    return mulaw_data
+    try:
+        # Ensure we have valid PCM data
+        if not pcm_data or len(pcm_data) == 0:
+            return b''
+            
+        # Downsample from 16kHz to 8kHz if needed
+        if sample_rate_in != sample_rate_out:
+            # Simple downsampling by taking every other sample (assumes 16-bit samples)
+            if len(pcm_data) % 2 == 0:
+                # Convert bytes to 16-bit samples, downsample, then back to bytes
+                samples = []
+                for i in range(0, len(pcm_data), 4):  # Every other 16-bit sample
+                    if i + 1 < len(pcm_data):
+                        samples.extend([pcm_data[i], pcm_data[i + 1]])
+                pcm_data = bytes(samples)
+            else:
+                pcm_data = pcm_data[::2]
+        
+        # Convert to mu-law (assuming 16-bit PCM input)
+        mulaw_data = audioop.lin2ulaw(pcm_data, 2)  # 2 = 16-bit samples
+        return mulaw_data
+        
+    except Exception as e:
+        logging.error(f"Error converting PCM to mu-law: {e}")
+        return b''
 
 def calculate_audio_volume(audio_data):
     """Calculate a simple volume metric from audio data."""
@@ -96,27 +115,40 @@ async def get_openai_response(text):
 
 async def stream_elevenlabs_to_twilio(text, twilio_ws, stream_sid):
     """Streams text to ElevenLabs and the resulting audio back to Twilio."""
-    global tts_task
+    global tts_task, bot_is_speaking
     logging.info(f"Streaming to ElevenLabs: {text}")
     
     try:
-        bot_is_speaking = True
-        async with websockets.connect(ELEVENLABS_URL) as elevenlabs_ws:
+        async with speech_lock:
+            bot_is_speaking = True
+            
+        headers = {"xi-api-key": ELEVENLABS_API_KEY}
+        async with websockets.connect(ELEVENLABS_URL, additional_headers=headers) as elevenlabs_ws:
             # Send the initial configuration message to ElevenLabs
             await elevenlabs_ws.send(json.dumps({
                 "text": " ",
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-                "xi_api_key": ELEVENLABS_API_KEY,
+                "generation_config": {
+                    "chunk_length_schedule": [120, 160, 250, 290]
+                }
             }))
             
             # Send the text to be synthesized
-            await elevenlabs_ws.send(json.dumps({"text": text, "try_trigger_generation": True}))
+            await elevenlabs_ws.send(json.dumps({
+                "text": text + " ", 
+                "try_trigger_generation": True
+            }))
             
             # Send the end-of-stream message
             await elevenlabs_ws.send(json.dumps({"text": ""}))
 
             # Receive audio data and stream it to Twilio
             async for message in elevenlabs_ws:
+                # Check if we've been cancelled (user interrupted)
+                if not bot_is_speaking:
+                    logging.info("Bot speech interrupted by user")
+                    break
+                    
                 data = json.loads(message)
                 if data.get("audio"):
                     audio_chunk = base64.b64decode(data["audio"])
@@ -130,15 +162,28 @@ async def stream_elevenlabs_to_twilio(text, twilio_ws, stream_sid):
                         "streamSid": stream_sid,
                         "media": {"payload": base64.b64encode(mulaw_audio).decode('utf-8')}
                     }
-                    await twilio_ws.send(json.dumps(media_message))
+                    
+                    try:
+                        await twilio_ws.send(json.dumps(media_message))
+                    except websockets.exceptions.ConnectionClosed:
+                        logging.warning("Twilio connection closed while sending audio")
+                        break
+                        
+                elif data.get("isFinal"):
+                    logging.info("ElevenLabs finished generating audio")
+                    break
 
     except asyncio.CancelledError:
         logging.info("ElevenLabs TTS stream was cancelled (interrupted).")
+        raise
     except Exception as e:
         logging.error(f"ElevenLabs error: {e}")
+        raise
     finally:
+        async with speech_lock:
+            bot_is_speaking = False
+        tts_task = None
         logging.info("ElevenLabs stream finished.")
-        tts_task = None # Clear the task when done
 
 
 # --- WebSocket Server ---
@@ -165,7 +210,6 @@ async def websocket_handler(twilio_ws):
             speech_buffer = []  # Buffer to accumulate speech for interruption detection
 
             async def twilio_receiver(twilio_ws, deepgram_ws, shutdown_event):
-                """Receives audio from Twilio and sends it to Deepgram."""
                 """Receives audio from Twilio, handles interruptions, and forwards to Deepgram."""
                 nonlocal stream_sid, user_is_speaking
                 global tts_task, bot_is_speaking, last_audio_time 
@@ -183,7 +227,7 @@ async def websocket_handler(twilio_ws):
                             
                             # Calculate audio volume to detect speech
                             volume = calculate_audio_volume(chunk)                            
-                            # Check if the bot is the one speaking
+                            
                             # Check if this is likely user speech (above threshold)
                             if volume > AUDIO_VOLUME_THRESHOLD:
                                 last_audio_time = current_time
@@ -191,19 +235,33 @@ async def websocket_handler(twilio_ws):
                                 # If bot is speaking and we detect user speech, interrupt
                                 if bot_is_speaking:
                                     logging.info("User interruption detected - stopping bot speech")
+                                    async with speech_lock:
+                                        bot_is_speaking = False
+                                    
                                     if tts_task and not tts_task.done():
                                         # Send clear message to stop Twilio playback
-                                        await twilio_ws.send(json.dumps({
-                                            "event": "clear", 
-                                            "streamSid": stream_sid
-                                        }))
+                                        try:
+                                            await twilio_ws.send(json.dumps({
+                                                "event": "clear", 
+                                                "streamSid": stream_sid
+                                            }))
+                                        except Exception as e:
+                                            logging.error(f"Error sending clear message: {e}")
+                                        
                                         tts_task.cancel()
+                                        try:
+                                            await tts_task
+                                        except asyncio.CancelledError:
+                                            pass
                                         tts_task = None
-                                    bot_is_speaking = False
                                 
                                 user_is_speaking = True
                                 # Always forward user audio to Deepgram when they're speaking
-                                await deepgram_ws.send(chunk)
+                                try:
+                                    await deepgram_ws.send(chunk)
+                                except websockets.exceptions.ConnectionClosed:
+                                    logging.warning("Deepgram connection closed")
+                                    break
                             
                             else:
                                 # Low volume - check if user has stopped speaking
@@ -213,7 +271,11 @@ async def websocket_handler(twilio_ws):
                                     logging.info("User finished speaking")
                                 
                                 # Still forward low-volume audio to maintain connection
-                                await deepgram_ws.send(chunk)                            
+                                try:
+                                    await deepgram_ws.send(chunk)
+                                except websockets.exceptions.ConnectionClosed:
+                                    logging.warning("Deepgram connection closed")
+                                    break                          
 
                         elif data['event'] == 'stop':
                             logging.info("Twilio has stopped the stream.")
@@ -230,29 +292,41 @@ async def websocket_handler(twilio_ws):
             async def deepgram_receiver(deepgram_ws, shutdown_event):
                 """
                 Receives transcriptions from Deepgram, puts final utterances in a queue,
-                and listens for the shutdown signal.
+                and listens for the shutdown signal. Only processes contiguous sentences without 2+ second gaps.
                 """
                 full_transcript = []
+                last_speech_time = time.time()
+                
                 while not shutdown_event.is_set():
                     try:
                         # Wait for a message from Deepgram with a timeout to allow checking the shutdown event
                         message = await asyncio.wait_for(deepgram_ws.recv(), timeout=0.1)
                         data = json.loads(message)
 
-                        # **FIX 1**: Robustly check for a valid transcript message
+                        # Robustly check for a valid transcript message
                         if (data.get('type') == 'Results' and 
                         data.get('channel', {}).get('alternatives', [{}])[0].get('transcript')):
 
-                            transcript = data['channel']['alternatives'][0]['transcript']
+                            transcript = data['channel']['alternatives'][0]['transcript'].strip()
+                            current_time = time.time()
                         
                             if transcript and data.get('is_final'):
+                                # Check if there's been a gap of more than 2 seconds
+                                if current_time - last_speech_time > 2.0 and full_transcript:
+                                    # Gap detected, reset transcript buffer
+                                    logging.info("Speech gap detected, resetting transcript buffer")
+                                    full_transcript = []
+                                
                                 full_transcript.append(transcript)
+                                last_speech_time = current_time
 
                             if data.get('speech_final'):
                                 final_text = " ".join(full_transcript).strip()
-                                if final_text:
+                                if final_text and not bot_is_speaking:
                                     logging.info(f"Final Utterance: {final_text}")
                                     await transcript_queue.put(final_text)
+                                else:
+                                    logging.info(f"Discarding utterance (bot speaking or empty): {final_text}")
                                 full_transcript = []
 
                     except asyncio.TimeoutError:
@@ -299,38 +373,25 @@ async def websocket_handler(twilio_ws):
                             user_text = get_transcript_task.result()
 
                             # Only respond if bot is not currently speaking
-                            if not bot_is_speaking:
+                            if not bot_is_speaking and stream_sid:
                                 logging.info(f"Processing user input: {user_text}")
                                 ai_response_text = await get_openai_response(user_text)
 
+                                # Double-check bot isn't speaking before starting TTS
                                 if ai_response_text and not bot_is_speaking:
-                                    # Double-check bot isn't speaking before starting TTS
                                     try:
                                         tts_task = asyncio.create_task(
                                             stream_elevenlabs_to_twilio(ai_response_text, twilio_ws, stream_sid)
                                         )
                                         await tts_task
                                     except asyncio.CancelledError:
-                                        logging.info("TTS task was cancelled")
+                                        logging.info("TTS task was cancelled due to user interruption")
+                                    except Exception as e:
+                                        logging.error(f"Error in TTS task: {e}")
                                     finally:
-                                        bot_is_speaking = False # ALWAYS reset flag after TTS is done
                                         tts_task = None
                             else:
-                                logging.info("Bot is speaking, queuing user input")
-                                # Could implement a queue here if needed
-
-
-                            # ai_response_text = await get_openai_response(user_text)
-                            # if ai_response_text:
-                            #     # --- Key Change Here ---
-                            #     bot_is_speaking = True # Set flag BEFORE starting TTS
-                            #     try:
-                            #         tts_task = asyncio.create_task(
-                            #             stream_elevenlabs_to_twilio(ai_response_text, twilio_ws, stream_sid)
-                            #         )
-                            #         await tts_task
-                            #     finally:
-                            #         bot_is_speaking = False 
+                                logging.info(f"Bot is speaking or no stream_sid, discarding user input: {user_text}")
 
                     except asyncio.CancelledError:
                         logging.info("Response manager task cancelled.")

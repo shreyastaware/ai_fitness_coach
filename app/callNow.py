@@ -28,8 +28,8 @@ def make_call():
 
     try:
         call = client.calls.create(
-            to=RECIPIENT_PHONE_NUMBER,
-            # to="+918809779946",
+            # to=RECIPIENT_PHONE_NUMBER,
+            to="+918809779946",
             from_=TWILIO_PHONE_NUMBER,
             url=HTTPS_WEBSOCKET_URL
         )
