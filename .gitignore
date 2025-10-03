@@ -1,4 +1,7 @@
 aifc/
+._/
+*/._*
+*/*/._*
 .vscode/
 *ignore_files/
 .env

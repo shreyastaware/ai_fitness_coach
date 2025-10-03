@@ -1,0 +1,19 @@
+# Ignore sensitive environment files
+.env
+.env.*
+!.env.example
+
+# Ignore secrets and credentials
+*.key
+*.pem
+credentials.json
+secrets.yml
+
+# Ignore node modules and build outputs
+node_modules/
+dist/
+build/
+
+# Ignore local configuration
+.vscode/
+.idea/
